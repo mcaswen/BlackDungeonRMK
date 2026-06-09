@@ -1,0 +1,133 @@
+# Unreal Engine 5 .gitignore
+# Put this file at the root of your UE project, next to YourProject.uproject
+
+# ------------------------------------------------------------
+# UE generated / local cache folders
+# ------------------------------------------------------------
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Project-specific local build output
+Build/Receipts/
+Build/Windows/
+Build/Win64/
+Build/Mac/
+Build/Linux/
+Build/IOS/
+Build/Android/
+Build/HoloLens/
+
+# Plugin generated folders
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+Plugins/*/DerivedDataCache/
+Plugins/*/Saved/
+
+# ------------------------------------------------------------
+# IDE / editor generated files
+# ------------------------------------------------------------
+.vs/
+.vscode/.browse.VC.db*
+.vscode/*.VC.db
+.vscode/ipch/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
+*.ipch
+*.iobj
+*.ipdb
+
+# Visual Studio / Rider / Xcode generated project files
+*.sln
+*.xcodeproj
+*.xcworkspace
+
+# ------------------------------------------------------------
+# Compilation / binary output
+# ------------------------------------------------------------
+*.obj
+*.o
+*.lo
+*.la
+*.so
+*.dylib
+*.dll
+*.exe
+*.app
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.a
+
+# ------------------------------------------------------------
+# Logs, crash dumps, profiling traces
+# ------------------------------------------------------------
+*.log
+*.dmp
+*.mdmp
+*.tmp
+*.temp
+*.trace
+*.utrace
+*.ucache
+*.csv
+
+# ------------------------------------------------------------
+# Packaged builds / archives
+# ------------------------------------------------------------
+PackagedBuilds/
+Releases/
+StagedBuilds/
+Saved/StagedBuilds/
+Saved/Cooked/
+Saved/Crashes/
+Saved/Logs/
+Saved/Profiling/
+Saved/Screenshots/
+Saved/Autosaves/
+Saved/Backup/
+
+# ------------------------------------------------------------
+# OS junk
+# ------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ------------------------------------------------------------
+# Python / misc tools, if used in the project
+# ------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+
+# ------------------------------------------------------------
+# IMPORTANT: do NOT ignore these normal UE project assets
+# ------------------------------------------------------------
+# Keep:
+#   *.uproject
+#   Config/
+#   Content/
+#   Source/
+#   Plugins/*/*.uplugin
+#   Plugins/*/Content/
+#   Plugins/*/Source/
+#
+# For team projects, use Git LFS for large binary assets such as:
+#   *.uasset, *.umap, *.fbx, *.png, *.wav, *.mp4
