@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+#
+# Wrapper for UAssetJsonExporter.
+#
+# Routing:
+#   1. If <ProjectDir>/Saved/UAssetExportQueue/.alive is fresh (mtime within
+#      HEARTBEAT_FRESHNESS_SEC), an in-editor queue subsystem is active. Write
+#      a pending task json, wait for the corresponding done/<uuid>.json.
+#   2. Otherwise, launch the commandlet directly (legacy path). The commandlet
+#      itself also checks the heartbeat and aborts on conflict.
+#
+# Usage:
+#   run_commandlet.sh <UE_PATH> <UPROJECT> <RunName> <AssetList> [IDLE_SEC] [MAX_SEC] [EXTRA_ARGS]
+#
+# Args:
+#   UE_PATH     Engine install root, e.g. "C:/Program Files/Epic Games/UE_5.7"
+#   UPROJECT    Absolute path to the .uproject file
+#   RunName     Commandlet name, e.g. "BlueprintEdGraphExport"
+#   AssetList   Comma-separated asset paths, e.g. "/Game/Foo/BP_A,/Game/Bar/BP_B"
+#   IDLE_SEC    Commandlet path: seconds of mtime stability before kill. Default 10.
+#   MAX_SEC     Absolute upper bound on total wait. Default 600.
+#   EXTRA_ARGS  Forwarded to the commandlet (e.g. "-graphs"). Default empty.
+#
+# Exit codes:
+#   0 - success
+#   1 - one or more expected outputs missing / dispatch failure
+#   2 - bad invocation
+
+set -u
+
+HEARTBEAT_FRESHNESS_SEC=15
+
+if [ "$#" -lt 4 ]; then
+    echo "Usage: $0 <UE_PATH> <UPROJECT> <RunName> <AssetList> [IDLE_SEC] [MAX_SEC] [EXTRA_ARGS]" >&2
+    exit 2
+fi
+
+UE_PATH="$1"
+UPROJECT="$2"
+RUN="$3"
+ASSETS="$4"
+IDLE_SEC="${5:-10}"
+MAX_SEC="${6:-600}"
+EXTRA_ARGS="${7:-}"
+
+UE_CMD="$UE_PATH/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+PROJECT_DIR="$(dirname "$UPROJECT")"
+EXPORT_ROOT="$PROJECT_DIR/Intermediate/UAssetExport"
+QUEUE_ROOT="$PROJECT_DIR/Saved/UAssetExportQueue"
+ALIVE_FILE="$QUEUE_ROOT/.alive"
+PENDING_DIR="$QUEUE_ROOT/pending"
+DONE_DIR="$QUEUE_ROOT/done"
+
+if [ ! -f "$UPROJECT" ]; then
+    echo "[run_commandlet] not found: $UPROJECT" >&2
+    exit 2
+fi
+
+get_mtime() {
+    stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+is_heartbeat_fresh() {
+    if [ ! -f "$ALIVE_FILE" ]; then
+        return 1
+    fi
+    local mtime now
+    mtime=$(get_mtime "$ALIVE_FILE")
+    now=$(date +%s)
+    if [ $((now - mtime)) -le "$HEARTBEAT_FRESHNESS_SEC" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# $1 = Windows pid. 0 if a live Windows process with that pid exists.
+is_winpid_alive() {
+    local wp="$1"
+    [ -z "$wp" ] && return 1
+    tasklist //FI "PID eq $wp" //NH 2>/dev/null | grep -qw "$wp"
+}
+
+# Kill a backgrounded native UnrealEditor-Cmd job. $! is an MSYS pid; Windows
+# taskkill needs the Windows pid from /proc/<msys_pid>/winpid. Tree-kill (//T)
+# also reaps ShaderCompileWorker / CrashReportClient children, then verify the
+# Windows process is actually gone. Returns 0 only if confirmed dead.
+terminate_commandlet() {
+    local msys_pid="$1" win_pid="$2"
+
+    if [ -z "$win_pid" ] && [ -r "/proc/$msys_pid/winpid" ]; then
+        win_pid="$(cat "/proc/$msys_pid/winpid" 2>/dev/null)"
+    fi
+
+    if [ -n "$win_pid" ]; then
+        taskkill //F //T //PID "$win_pid" >/dev/null 2>&1
+    fi
+    kill -9 "$msys_pid" 2>/dev/null
+
+    local tries=0
+    while [ -n "$win_pid" ] && is_winpid_alive "$win_pid"; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 5 ]; then
+            echo "[run_commandlet] WARN WINPID=$win_pid still alive after taskkill" >&2
+            return 1
+        fi
+        taskkill //F //T //PID "$win_pid" >/dev/null 2>&1
+        sleep 1
+    done
+    return 0
+}
+
+route_queue() {
+    mkdir -p "$PENDING_DIR" "$DONE_DIR"
+
+    local uuid="$(date +%s)-$$-$RANDOM"
+    local pending_path="$PENDING_DIR/$uuid.json"
+    local pending_tmp="$PENDING_DIR/.$uuid.json.tmp"
+    local done_path="$DONE_DIR/$uuid.json"
+
+    local assets_json=""
+    local A
+    IFS=',' read -r -a ASSET_ARR <<< "$ASSETS"
+    for A in "${ASSET_ARR[@]}"; do
+        if [ -n "$assets_json" ]; then
+            assets_json="$assets_json,"
+        fi
+        assets_json="$assets_json\"$A\""
+    done
+
+    cat > "$pending_tmp" <<EOF
+{
+  "RunName": "$RUN",
+  "Assets": [$assets_json],
+  "ExtraArgs": "$EXTRA_ARGS"
+}
+EOF
+    mv "$pending_tmp" "$pending_path"
+
+    echo "[run_commandlet] queued task $uuid via in-editor subsystem" >&2
+
+    local start_ts now
+    start_ts=$(date +%s)
+    while true; do
+        if [ -f "$done_path" ]; then
+            break
+        fi
+        now=$(date +%s)
+        if [ $((now - start_ts)) -gt "$MAX_SEC" ]; then
+            echo "[run_commandlet] queue task $uuid timed out after ${MAX_SEC}s" >&2
+            return 1
+        fi
+        if ! is_heartbeat_fresh; then
+            echo "[run_commandlet] heartbeat went stale while waiting on $uuid" >&2
+            return 1
+        fi
+        sleep 1
+    done
+
+    local exit_code
+    exit_code=$(grep -o '"ExitCode"[[:space:]]*:[[:space:]]*-\{0,1\}[0-9]\+' "$done_path" | grep -o '\-\{0,1\}[0-9]\+$')
+    echo "[run_commandlet] task $uuid done exit=${exit_code:-1}" >&2
+    rm -f "$done_path"
+    return "${exit_code:-1}"
+}
+
+route_commandlet() {
+    if [ ! -x "$UE_CMD" ] && [ ! -f "$UE_CMD" ]; then
+        echo "[run_commandlet] not found: $UE_CMD" >&2
+        return 2
+    fi
+
+    local A REL OUT
+    IFS=',' read -r -a ASSET_ARR <<< "$ASSETS"
+    EXPECTED_FILES=()
+    for A in "${ASSET_ARR[@]}"; do
+        REL="${A#/}"
+        OUT="$EXPORT_ROOT/$REL.json"
+        EXPECTED_FILES+=("$OUT")
+        rm -f "$OUT"
+    done
+
+    local CMD_LOG="$QUEUE_ROOT/last_commandlet.log"
+    mkdir -p "$QUEUE_ROOT"
+    : > "$CMD_LOG"
+
+    MSYS_NO_PATHCONV=1 "$UE_CMD" "$UPROJECT" \
+        -run="$RUN" -assets="$ASSETS" $EXTRA_ARGS \
+        -nullrhi -nosplash -nosound -unattended -stdout \
+        >"$CMD_LOG" 2>&1 &
+    local PID=$!
+    local WINPID=""
+    if [ -r "/proc/$PID/winpid" ]; then
+        WINPID="$(cat "/proc/$PID/winpid" 2>/dev/null)"
+    fi
+    echo "[run_commandlet] launched PID=$PID WINPID=${WINPID:-?} run=$RUN idle=${IDLE_SEC}s max=${MAX_SEC}s" >&2
+
+    local START_TS=$(date +%s)
+    local STABLE_SINCE=0
+    local LAST_SIG=""
+    local KILL_REASON=""
+    local NOW SIG ALL_PRESENT F
+
+    while kill -0 "$PID" 2>/dev/null; do
+        NOW=$(date +%s)
+
+        if [ $((NOW - START_TS)) -gt "$MAX_SEC" ]; then
+            KILL_REASON="MAX_SEC ${MAX_SEC}s exceeded"
+            break
+        fi
+
+        SIG=""
+        ALL_PRESENT=1
+        for F in "${EXPECTED_FILES[@]}"; do
+            if [ ! -f "$F" ]; then
+                ALL_PRESENT=0
+                break
+            fi
+            SIG="$SIG $(get_mtime "$F")"
+        done
+
+        if [ "$ALL_PRESENT" -eq 1 ]; then
+            if [ "$SIG" = "$LAST_SIG" ] && [ "$STABLE_SINCE" -ne 0 ]; then
+                if [ $((NOW - STABLE_SINCE)) -ge "$IDLE_SEC" ]; then
+                    KILL_REASON="outputs stable for ${IDLE_SEC}s"
+                    break
+                fi
+            else
+                LAST_SIG="$SIG"
+                STABLE_SINCE="$NOW"
+            fi
+        else
+            STABLE_SINCE=0
+            LAST_SIG=""
+        fi
+
+        sleep 1
+    done
+
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "[run_commandlet] killing PID=$PID WINPID=${WINPID:-?} reason=$KILL_REASON" >&2
+        if terminate_commandlet "$PID" "$WINPID"; then
+            wait "$PID" 2>/dev/null
+        fi
+    else
+        echo "[run_commandlet] PID=$PID exited on its own" >&2
+    fi
+
+    local RC=0
+    for F in "${EXPECTED_FILES[@]}"; do
+        if [ ! -f "$F" ]; then
+            echo "[run_commandlet] missing output: $F" >&2
+            RC=1
+        fi
+    done
+    if [ "$RC" -ne 0 ]; then
+        echo "[run_commandlet] commandlet diagnostics (tail of $CMD_LOG):" >&2
+        tail -n 40 "$CMD_LOG" >&2 2>/dev/null
+        echo "[run_commandlet] full UE log dir: $PROJECT_DIR/Saved/Logs/" >&2
+    fi
+    return "$RC"
+}
+
+if is_heartbeat_fresh; then
+    route_queue
+    exit $?
+else
+    route_commandlet
+    exit $?
+fi
